@@ -52,10 +52,32 @@ load_dotenv()
 CHUNK_SIZE = 500      # 每块最大字符数
 CHUNK_OVERLAP = 80    # 相邻块之间的重叠字符数（保持上下文连续）
 
+# Embedding 模式：local=本地模型(免费,离线) | api=调用Embedding API
+EMBED_MODE = "local"
+
 client = OpenAI(
     api_key=os.getenv("DEEPSEEK_API_KEY", "your-deepseek-key"),
     base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
 )
+
+# 本地 Embedding 模型（懒加载，首次运行会自动下载 ~90MB）
+_embed_model = None
+
+
+def _get_embed_model():
+    """懒加载本地 embedding 模型。
+
+    使用 BAAI/bge-small-zh — 中文专用，轻量（90MB），无需 GPU。
+    首次运行自动下载（通过国内镜像 hf-mirror.com）。
+    """
+    global _embed_model
+    if _embed_model is None:
+        from sentence_transformers import SentenceTransformer
+        import os as _os
+        # 使用 HuggingFace 国内镜像，解决 SSL/网络问题
+        _os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+        _embed_model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
+    return _embed_model
 
 
 # ================================================================
@@ -113,16 +135,22 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
 def embed_texts(texts: list[str]) -> np.ndarray:
     """将文本列表转换为向量矩阵。
 
-    调用 DeepSeek 的 Embedding API（兼容 OpenAI 格式）。
-    每条文本变成一个 1536 维的浮点数向量。
-    批量处理以避免 API 限制（一次最多 20 条）。
+    两种模式：
+    - local: 使用 BAAI/bge-small-zh 本地模型（免费、离线、90MB）
+    - api:   使用 OpenAI 兼容的 Embedding API
     """
+    if EMBED_MODE == "local":
+        model = _get_embed_model()
+        # sentence-transformers 的 encode 方法，返回 numpy 数组
+        return model.encode(texts, normalize_embeddings=True)
+
+    # API 模式
     all_embeddings = []
     batch_size = 20
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
         response = client.embeddings.create(
-            model="text-embedding-3-small",  # OpenAI 的 embedding 模型
+            model="text-embedding-3-small",
             input=batch,
         )
         all_embeddings.extend([d.embedding for d in response.data])
