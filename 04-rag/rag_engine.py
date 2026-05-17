@@ -188,19 +188,25 @@ class VectorStore:
         self.save_path = save_path or os.path.join(os.path.dirname(__file__), "vector_store.json")
         self.chunks: list[str] = []      # 文档块原文
         self.sources: list[str] = []     # 每个块的来源文件名
+        self.indexed_files: set = set()  # 已索引的文件名（去重用）
         self.vectors: np.ndarray | None = None  # 向量矩阵，每行一个 chunk
 
         if os.path.exists(self.save_path):
             self._load()
 
     def add(self, chunks: list[str], source: str = "unknown"):
-        """将文档块向量化并存入。"""
+        """将文档块向量化并存入。自动跳过已索引的文件。"""
         if not chunks:
             return 0
+        if source in self.indexed_files:
+            print(f"    跳过（已索引）: {source}")
+            return 0
+
         vectors = embed_texts(chunks)
 
         self.chunks.extend(chunks)
         self.sources.extend([source] * len(chunks))
+        self.indexed_files.add(source)
 
         if self.vectors is None:
             self.vectors = vectors
@@ -255,6 +261,7 @@ class VectorStore:
         data = {
             "chunks": self.chunks,
             "sources": self.sources,
+            "indexed_files": list(self.indexed_files),
             "vectors": self.vectors.tolist() if self.vectors is not None else [],
         }
         with open(self.save_path, "w", encoding="utf-8") as f:
@@ -266,6 +273,7 @@ class VectorStore:
             data = json.load(f)
         self.chunks = data["chunks"]
         self.sources = data["sources"]
+        self.indexed_files = set(data.get("indexed_files", []))
         self.vectors = np.array(data["vectors"], dtype=np.float32) if data["vectors"] else None
 
 
@@ -333,3 +341,223 @@ def ingest_directory(store: VectorStore, dir_path: str, patterns: list[str] = No
 
     print(f"\n总计: {total} 个文本块，来自 {len(files)} 个文件")
     return total
+
+
+# ================================================================
+# 高级特性 1：混合检索（向量 + BM25 关键词）
+# ================================================================
+def hybrid_search(store: VectorStore, query: str, top_k: int = 5, alpha: float = 0.7) -> list[dict]:
+    """混合检索：语义搜索 + 关键词搜索，取加权结果。
+
+    为什么需要混合检索：
+    - 语义搜索擅长找"意思相近"的内容，但可能漏掉精确关键词
+    - 关键词搜索能精确匹配术语，但不懂同义词
+    - 两者互补，alpha 参数控制权重
+
+    alpha=0.7 → 语义占 70%，关键词占 30%
+    alpha=1.0 → 纯语义搜索
+    alpha=0.0 → 纯关键词搜索
+    """
+    if store.vectors is None or len(store.chunks) == 0:
+        return []
+
+    # --- 语义搜索 ---
+    qvec = embed_query(query)
+    norms = np.linalg.norm(store.vectors, axis=1) * np.linalg.norm(qvec)
+    semantic_scores = np.dot(store.vectors, qvec) / (norms + 1e-10)
+
+    # --- 关键词搜索（简化 BM25） ---
+    query_terms = set(query.lower().split())
+    keyword_scores = np.zeros(len(store.chunks))
+
+    for i, chunk in enumerate(store.chunks):
+        chunk_lower = chunk.lower()
+        # 计算查询词在文档中的覆盖率
+        matches = sum(1 for term in query_terms if term in chunk_lower)
+        if matches > 0:
+            keyword_scores[i] = matches / len(query_terms)
+
+    # 归一化到 0-1
+    if keyword_scores.max() > 0:
+        keyword_scores = keyword_scores / keyword_scores.max()
+
+    # --- 加权合并 ---
+    combined = alpha * semantic_scores + (1 - alpha) * keyword_scores
+
+    top_indices = np.argsort(combined)[::-1][:top_k]
+
+    return [
+        {
+            "content": store.chunks[i],
+            "source": store.sources[i],
+            "score": float(combined[i]),
+            "semantic_score": float(semantic_scores[i]),
+            "keyword_score": float(keyword_scores[i]),
+        }
+        for i in top_indices
+    ]
+
+
+# ================================================================
+# 高级特性 2：重排序（Cross-encoder Reranker）
+# ================================================================
+_reranker = None
+
+
+def _get_reranker():
+    """懒加载 Cross-encoder 重排序模型。"""
+    global _reranker
+    if _reranker is None:
+        from sentence_transformers import CrossEncoder
+        _reranker = CrossEncoder("BAAI/bge-reranker-base")
+    return _reranker
+
+
+def rerank_results(query: str, candidates: list[dict], top_k: int = 3) -> list[dict]:
+    """用 Cross-encoder 对初检结果重新打分。
+
+    初检（粗排）：向量搜索快速召回 20 条 → 快但精度一般
+    重排序（精排）：Cross-encoder 对 20 条重新打分 → 慢但精度高
+    最终取 top 3 → 又快又准
+
+    Cross-encoder vs Bi-encoder（你之前用的）：
+    - Bi-encoder：query 和 doc 分别编码，然后算相似度。快但不够准。
+    - Cross-encoder：query 和 doc 一起编码，直接输出相关性分数。准但慢。
+    """
+    if not candidates:
+        return []
+
+    model = _get_reranker()
+    pairs = [(query, c["content"]) for c in candidates]
+
+    # Cross-encoder 直接输出相关性分数（0~1）
+    scores = model.predict(pairs)
+
+    # 按新分数排序
+    for i, c in enumerate(candidates):
+        c["rerank_score"] = float(scores[i])
+
+    ranked = sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)
+    return ranked[:top_k]
+
+
+# ================================================================
+# 高级特性 3：多轮对话 RAG
+# ================================================================
+class MultiTurnRAG:
+    """支持多轮对话的 RAG 问答。
+
+    解决追问问题：
+    用户第1轮："公司年假政策是什么？"
+        → 正常 RAG 检索 → 回答
+
+    用户第2轮："那如果没休完呢？"
+        → 问题本身缺少上下文，直接搜搜不到
+        → 用 LLM 把问题改写成："公司年假如果没休完怎么处理？"
+        → 再用改写后的问题检索 → 得到正确结果
+
+    核心机制：
+    1. Query Rewriting：把模糊追问改写成完整的独立问题
+    2. 对话记忆：保留最近 N 轮问答作为上下文
+    """
+
+    def __init__(self, store: VectorStore, max_history: int = 5):
+        self.store = store
+        self.max_history = max_history
+        self.history: list[dict] = []  # [{"question": ..., "answer": ...}, ...]
+
+    def ask(self, question: str, top_k: int = 5) -> dict:
+        """处理一轮对话，自动改写追问并检索。"""
+        # 第 1 步：如果有历史记录，先改写问题
+        if self.history:
+            rewritten = self._rewrite_query(question)
+        else:
+            rewritten = question
+
+        # 第 2 步：用改写后的问题检索
+        hits = self.store.search(rewritten, top_k=top_k)
+
+        if not hits:
+            return {"answer": "知识库中没有找到相关信息。", "sources": [], "rewritten_query": rewritten}
+
+        # 第 3 步：拼接上下文（包含历史对话）
+        context = "\n\n---\n\n".join(
+            f"[来源: {h['source']}] {h['content']}" for h in hits
+        )
+
+        # 构建带历史的消息
+        messages = [
+            {
+                "role": "system",
+                "content": "你是一个知识库问答助手。根据文档内容回答问题。如果文档中没有相关信息，如实告知。",
+            },
+        ]
+
+        # 加入历史对话
+        for turn in self.history[-self.max_history:]:
+            messages.append({"role": "user", "content": turn["question"]})
+            messages.append({"role": "assistant", "content": turn["answer"]})
+
+        # 加入当前问题
+        messages.append({
+            "role": "user",
+            "content": f"文档内容：\n{context}\n\n问题（原始：{question}）：{rewritten}",
+        })
+
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=messages,
+            temperature=0.3,
+        )
+
+        answer = response.choices[0].message.content
+
+        # 第 4 步：保存到历史
+        self.history.append({"question": question, "answer": answer})
+        if len(self.history) > self.max_history:
+            self.history = self.history[-self.max_history:]
+
+        return {
+            "answer": answer,
+            "sources": hits,
+            "rewritten_query": rewritten,
+        }
+
+    def _rewrite_query(self, question: str) -> str:
+        """用 LLM 把追问改写成完整问题。
+
+        输入："那如果没休完呢？"
+        输出："如果公司年假没休完，应该怎么处理？"
+
+        原理：把对话历史 + 当前追问发给 LLM，让它补全上下文。
+        """
+        history_text = "\n".join(
+            f"用户：{turn['question']}\n助手：{turn['answer']}"
+            for turn in self.history[-3:]  # 只需最近 3 轮
+        )
+
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是一个问题改写助手。用户的追问可能缺少上下文（如'那这个呢'）。"
+                        "请根据对话历史，把用户的追问改写成完整的独立问题。"
+                        "只需输出改写后的问题，不要加任何解释。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"对话历史：\n{history_text}\n\n当前追问：{question}\n\n改写后的完整问题：",
+                },
+            ],
+            temperature=0.1,
+        )
+        rewritten = response.choices[0].message.content.strip()
+        return rewritten if rewritten else question
+
+    def reset(self):
+        """清空对话历史。"""
+        self.history = []
+
