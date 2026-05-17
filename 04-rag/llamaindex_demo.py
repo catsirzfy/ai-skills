@@ -34,9 +34,9 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # --- 必须在 import HuggingFace 模型之前设置镜像 ---
-# HuggingFace 的 SentenceTransformer 在初始化时就会联网下载
-# 必须在创建模型前把镜像改好
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
 
 from dotenv import load_dotenv
 load_dotenv()

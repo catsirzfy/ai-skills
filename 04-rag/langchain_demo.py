@@ -42,6 +42,8 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # --- 必须在创建 HuggingFace 模型之前设置镜像 ---
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
 
 from dotenv import load_dotenv
 load_dotenv()

@@ -42,6 +42,14 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+# 必须在创建 HuggingFace 模型之前设置（解决国内网络问题）
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+# Python 3.14 的 SSL 证书链可能不完整，禁用验证（仅用于下载模型）
+os.environ["CURL_CA_BUNDLE"] = ""
+os.environ["REQUESTS_CA_BUNDLE"] = ""
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
+
 import numpy as np
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -73,9 +81,6 @@ def _get_embed_model():
     global _embed_model
     if _embed_model is None:
         from sentence_transformers import SentenceTransformer
-        import os as _os
-        # 使用 HuggingFace 国内镜像，解决 SSL/网络问题
-        _os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
         _embed_model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
     return _embed_model
 
