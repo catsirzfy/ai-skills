@@ -35,15 +35,13 @@ os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional
 
 from rag_engine import (
     VectorStore, ingest_directory,
     hybrid_search, rerank_results,
-    rag_query, MultiTurnRAG,
 )
 
 # --- 初始化 ---
@@ -53,13 +51,22 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# 启动时自动索引文档
+# 模块级别初始化（只执行一次）
 store = VectorStore()
-multiturn = MultiTurnRAG(store)
 
 print("正在索引文档...")
 ingest_directory(store, r"D:\实验", patterns=["*.md"])
 print(f"索引完成：{store.count()} 个文本块")
+
+# OpenAI 客户端（复用，不每个请求重建）
+from openai import OpenAI
+from dotenv import load_dotenv
+load_dotenv()
+
+llm_client = OpenAI(
+    api_key=os.getenv("DEEPSEEK_API_KEY"),
+    base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+)
 
 
 # --- 数据模型 ---
@@ -69,7 +76,6 @@ class QuestionRequest(BaseModel):
     use_hybrid: bool = True     # 是否使用混合检索
     use_rerank: bool = False     # 是否使用重排序
     stream: bool = True          # 是否流式输出
-    session_id: Optional[str] = None  # 会话 ID（多轮对话）
 
 
 class IngestRequest(BaseModel):
@@ -107,16 +113,7 @@ def chat(req: QuestionRequest):
         f"[来源: {h['source']}] {h['content']}" for h in hits
     )
 
-    from openai import OpenAI
-    from dotenv import load_dotenv
-    load_dotenv()
-
-    client = OpenAI(
-        api_key=os.getenv("DEEPSEEK_API_KEY"),
-        base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-    )
-
-    response = client.chat.completions.create(
+    response = llm_client.chat.completions.create(
         model="deepseek-chat",
         messages=[
             {"role": "system", "content": "你是一个知识库问答助手。根据文档内容回答问题。如果文档中没有相关信息，如实告知。"},
@@ -154,18 +151,9 @@ def chat_stream(req: QuestionRequest):
         f"[来源: {h['source']}] {h['content']}" for h in hits
     )
 
-    from openai import OpenAI
-    from dotenv import load_dotenv
-    load_dotenv()
-
-    client = OpenAI(
-        api_key=os.getenv("DEEPSEEK_API_KEY"),
-        base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-    )
-
     def generate():
         """SSE 生成器 — 每个 chunk 是一条 event。"""
-        stream = client.chat.completions.create(
+        stream = llm_client.chat.completions.create(
             model="deepseek-chat",
             messages=[
                 {"role": "system", "content": "你是一个知识库问答助手。根据文档内容回答问题。"},

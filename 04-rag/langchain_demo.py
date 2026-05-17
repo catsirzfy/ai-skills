@@ -48,8 +48,6 @@ ssl._create_default_https_context = ssl._create_unverified_context
 from dotenv import load_dotenv
 load_dotenv()
 
-from openai import OpenAI
-
 # --- LangChain 服务提供方配置 ---
 # LangChain 1.0+ 推荐用 ChatModel 而不是旧的 LLM
 from langchain_openai import ChatOpenAI
