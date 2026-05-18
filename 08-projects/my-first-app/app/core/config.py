@@ -40,9 +40,12 @@ class Settings(BaseSettings):
             return f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/0"
         return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/0"
 
-    # 数据库 URL (自动拼接)
-    @property
-    def DATABASE_URL(self) -> str:
+    # 如果 .env 里直接写了 DATABASE_URL，用 .env 的；否则自动拼接 PostgreSQL
+    DATABASE_URL: str = ""
+
+    def get_database_url(self) -> str:
+        if self.DATABASE_URL:
+            return self.DATABASE_URL
         return (
             f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
             f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"

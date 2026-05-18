@@ -22,14 +22,17 @@ _SessionLocal = None
 def get_engine():
     global _engine
     if _engine is None:
-        _engine = create_async_engine(
-            settings.DATABASE_URL,
-            echo=settings.ENV == "development",
-            pool_pre_ping=True,
-            pool_recycle=1800,
-            pool_size=20,
-            max_overflow=10,
-        )
+        url = settings.get_database_url()
+        # SQLite 连接不需要连接池参数
+        if "sqlite" in url:
+            _engine = create_async_engine(url, echo=settings.ENV == "development")
+        else:
+            _engine = create_async_engine(
+                url,
+                echo=settings.ENV == "development",
+                pool_pre_ping=True, pool_recycle=1800,
+                pool_size=20, max_overflow=10,
+            )
     return _engine
 
 
