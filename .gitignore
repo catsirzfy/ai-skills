@@ -30,3 +30,4 @@ Thumbs.db
 session_*.json          # 对话历史保存
 chat_history_*.json     # 对话历史备份
 *.log                   # 日志文件
+06-agent/data/*.png      # 运行时生成的图表（示例数据保留）
