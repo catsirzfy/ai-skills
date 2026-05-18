@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 对话助手</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #eee; min-height: 100vh; }
+        .container { max-width: 800px; margin: 0 auto; padding: 20px; }
+        h1 { text-align: center; padding: 30px 0; color: #e94560; font-size: 28px; }
+
+        .chat-box { background: #16213e; border-radius: 12px; padding: 20px; margin-bottom: 20px; min-height: 400px; max-height: 600px; overflow-y: auto; }
+        .msg { margin-bottom: 16px; padding: 12px 16px; border-radius: 8px; max-width: 85%; line-height: 1.6; }
+        .msg.user { background: #0f3460; margin-left: auto; text-align: right; }
+        .msg.ai { background: #533483; margin-right: auto; }
+        .msg .role { font-size: 12px; color: #aaa; margin-bottom: 4px; }
+        .msg .time { font-size: 11px; color: #666; margin-top: 4px; }
+
+        .input-area { display: flex; gap: 10px; }
+        .input-area input { flex: 1; padding: 14px 18px; border: 2px solid #0f3460; border-radius: 8px; background: #16213e; color: #eee; font-size: 16px; outline: none; }
+        .input-area input:focus { border-color: #e94560; }
+        .input-area button { padding: 14px 28px; background: #e94560; color: white; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; transition: background 0.2s; }
+        .input-area button:hover { background: #c73e54; }
+        .input-area button:disabled { background: #666; cursor: not-allowed; }
+
+        .history { background: #16213e; border-radius: 12px; padding: 20px; margin-top: 20px; }
+        .history h2 { color: #e94560; margin-bottom: 12px; font-size: 18px; }
+        .history-item { padding: 8px 0; border-bottom: 1px solid #0f3460; cursor: pointer; font-size: 14px; }
+        .history-item:hover { color: #e94560; }
+
+        .loading { display: inline-block; width: 8px; height: 8px; background: #e94560; border-radius: 50%; animation: blink 1s infinite; }
+        @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>&#x1f916; AI 对话助手</h1>
+
+        <div class="chat-box" id="chatBox">
+            <div class="msg ai">
+                <div class="role">AI 助手</div>
+                你好！在下面输入你的问题，我会调用 DeepSeek AI 来回答。
+            </div>
+        </div>
+
+        <div class="input-area">
+            <input type="text" id="questionInput" placeholder="输入你的问题..." onkeypress="if(event.key==='Enter')askAI()">
+            <button id="sendBtn" onclick="askAI()">发送</button>
+        </div>
+
+        <div class="history">
+            <h2>&#x1f4dd; 历史记录</h2>
+            <div id="historyList">
+                <span style="color:#666">加载中...</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API = '/api/v1/chats';
+
+        // 加载历史
+        async function loadHistory() {
+            const res = await fetch(API);
+            const data = await res.json();
+            const list = document.getElementById('historyList');
+            if (!data.data || !data.data.items.length) {
+                list.innerHTML = '<span style="color:#666">暂无记录，开始对话吧</span>';
+                return;
+            }
+            list.innerHTML = data.data.items.map(c =>
+                `<div class="history-item" title="${c.question}">
+                    &#x1f4ac; ${c.question.substring(0, 40)}... — ${c.model}
+                </div>`
+            ).join('');
+        }
+
+        // 提问
+        async function askAI() {
+            const input = document.getElementById('questionInput');
+            const btn = document.getElementById('sendBtn');
+            const q = input.value.trim();
+            if (!q) return;
+
+            input.value = '';
+            btn.disabled = true;
+            btn.textContent = '思考中...';
+
+            // 显示用户消息
+            addMessage('user', q);
+
+            try {
+                // 1. 调后端 API，后端再调 DeepSeek
+                const res = await fetch(API + '/ask', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ question: q })
+                });
+                const data = await res.json();
+                const answer = data.data.answer;
+
+                // 2. 显示 AI 回答
+                addMessage('ai', answer);
+                loadHistory();  // 刷新历史
+            } catch (e) {
+                addMessage('ai', '出错了：' + e.message);
+            }
+
+            btn.disabled = false;
+            btn.textContent = '发送';
+        }
+
+        function addMessage(role, content) {
+            const box = document.getElementById('chatBox');
+            const div = document.createElement('div');
+            div.className = 'msg ' + role;
+            const now = new Date().toLocaleTimeString();
+            div.innerHTML = `
+                <div class="role">${role === 'user' ? '你' : 'AI 助手'}</div>
+                ${content.replace(/\n/g, '<br>')}
+                <div class="time">${now}</div>
+            `;
+            box.appendChild(div);
+            box.scrollTop = box.scrollHeight;
+        }
+
+        loadHistory();
+    </script>
+</body>
+</html>
