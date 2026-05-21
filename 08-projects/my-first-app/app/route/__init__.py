@@ -1,1 +1,0 @@
-from app.route.route import create_app
